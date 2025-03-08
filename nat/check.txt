@@ -1,0 +1,5 @@
+show ip nat translations //выводит результат только тогда, когда заменяет ip в пакете
+
+show ip nat [source|destination] pools
+show ip nat [source|destination] ruleset
+show ip nat [source|destination] ruleset [name]
