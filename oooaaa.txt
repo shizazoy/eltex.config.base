@@ -1,0 +1,209 @@
+switch:
+
+modprobe 8021q | tee -a /etc/modules
+
+vim /etc/net/ifaces/default/options
+OVS_REMOVE=no
+
+vim /etc/net/ifaces/enp7s1(2,3)/options
+TYPE=eth
+BOOTPROTO=static
+
+echo [ip]/[mask] > /etc/net/iface/enp7s1(2,3)/ipv4address
+echo default via [ip] > /etc/net/iface/enp7s1(2,3)/ipv4address
+
+ovs-vsctl add-bridge SW1-HQ
+ovs-vsctl add-port SW1-HQ enp7s1 trunk=10,20,30
+ovs-vsctl add-port SW1-HQ enp7s2 trunk=10,20,30
+ovs-vsctl add-port SW1-HQ enp7s3 trunk=10,20,30
+
+ovs-vsctl set bridge SW1-HQ stp_enable=true
+ovs−vsctl set bridge SW1-HQ other_config:stp-priority=16384
+
+nat:
+int isp
+ip nat outside
+
+int my-vlan111
+ip nat inside
+
+ip nat pool [name] [from-to]
+ip nat source dynamic inside pool [name] overload [ip]
+
+dhcp:
+ip pool [name] [from-to]
+dhcp-server [id]
+pool [name]
+gateway [ip]
+dns [ip]
+domain-name [domain.name]
+int [name] //интерфейс dhcp сервера для приёма пакетов
+dhcp-server 1
+
+gre:
+int [name gre]
+ip add [ip/mask]
+ip mtu 1476
+ip tunnel [ip source] [ip destination] mode gre
+
+ospf:
+router ospf [if]
+ospf router-id [x.x.x.x]
+passive-interface [int]
+network [network] [wildcard mask] area [number]
+no passive interface [int.gre]
+
+users:
+useradd [name] -m -U -s /bin/bash
+passwd [user]
+usermod -aG wheel [user]
+vim /etc/sudoers
+[user] ALL=(ALL:ALL) NOPASSWD: ALL
+
+bind9:
+apt-get install bind bind-utils
+vim /etc/bind/options.conf
+listen-on port 53 { [ip]; };
+allow-query { any; }; //or networks
+forwarders { [ip];};
+recursion yes;
+
+vim /etc/net/ifaces/enp7s1(2,3)/resolv.conf
+search [domain.name]
+nameserver [ip]
+
+systemctl restart network
+systemctl restart bind
+
+ntp:
+vim /etc/chrony.conf
+server [ip/domain] iburst prefer
+local stratum 5
+allow [network]
+systemctl restart chronyd
+
+domain:
+apt-get install task-samba-dc -y
+control bind-chroot disable
+vim /etc/sysconfig/bind
+KRB5CACHETYPE="none"
+vim /etc/bind/named.conf
+include "/var/lib/samba/bind-dns/named.conf";
+minimal-responses yes;
+tkey-gssapi-keytab "/var/lib/samba/bind-dns/dns.keytab";
+systemctl stop bind
+rm -f /etc/samba/smb.conf
+rm -rf /var/lib/samba
+rm -rf /var/cache/samba
+mkdir -p /var/lib/samba/sysvol
+samba-tool domain provision [dc, BIND9_DLZ]
+systemctl enable --now samba
+systemctl start bind
+cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
+samba-tool domain info [name]
+
+samba-tool dns add 127.0.0.1 [domain.name] [hostname] A [ip]
+samba-tool dns zonecreate 127.0.0.1 [revers-ip].in-addr.arpa
+samba-tool dns add 127.0.0.1 [revers-ip].in-addr.arpa [number(2)] PTR [hostname.domain.name]
+samba-tool dns add 127.0.0.1 [domain] [name] CNAME [hostname.domain.name] -U administrator
+
+samba-tool group add [name]
+samba-tool user add [name] [password]
+samba-tool group addmembers ["name"] [username]
+
+//повторить действия выше кроме тех, что после samba-tool domain provision и указание только последних двух параметров в dns
+
+systemctl disable smb nmb krb5kdc slapd bind
+
+kinit Administrator@[DOMAIN.NAME]
+
+systemctl enable --now samba bind
+
+samba-tool domain join [domain.name] DC -U Administrator --realm=[domain.name] --dns-backend=BIND9_DLZ
+samba-tool ou add 'OU=[name]'
+samba-tool drs replicate [from-hostname.domain.name] [to-hostname.domain.name] dc=[domain],dc=[name] -Uadministrator
+samba-tool drs replicate [to-hostname.domain.name] [from-hostname.domain.name] dc=[domain],dc=[name] -Uadministrator
+
+mkdir [/path/file]
+chmod 777 [/path/file]
+
+vim /etc/samba/smb.conf
+[SAMBA]
+path = [/path/file]
+comment = "SAMBA"
+public = yes
+writable = yes
+browseable = yes
+guest ok = yes
+
+systemctl restart samba
+smbclietn -L localhost -U Administartor
+
+backup:
+mkdir /var/bac/
+vim /etc/systemd/system/backup.service
+[Unit]
+Description=Backup
+
+[Service]
+Type=oneshot
+ExecStart=/bin/tar -czf "/var/bac/samba.tar.gz" /opt/data
+
+[Install]
+WantedBy=multi-user.target
+
+docker:
+apt-get update && apt-get install -y docker-engine
+systemctl enable --now docker.service
+docker run -d -p 5000:5000 --restart=always --name [name] registry:2
+
+vim Dockerfile
+FROM nginx:alpine
+COPY index.html /usr/share/nginx/html
+
+docker build -t localhost:5000/web:1.0 [. or /path/to/docker/file]
+docker images
+docker push localhost:5000/web:1.0
+docker rmi localhost:5000/web:1.0
+docker images //должен остаться
+
+docker run -d -p 80:80 --restart=always --name web localhost:5000/web:1.0
+
+zabbix:
+apt-get update && apt-get install -y postgresql16-server zabbix-server-pgsql
+/etc/init.d/postgresql initdb
+systemctl enable --now postgresql
+su - postgres -s /bin/sh -c 'createuser --no-superuser --no-createdb --no-createrole --encrypted --pwprompt zabbix'
+su - postgres -s /bin/sh -c 'createdb -O zabbix zabbix'
+systemctl restart postgresql
+su - postgres -s /bin/sh -c 'psql -U zabbix -f /usr/share/doc/zabbix-common-database-pgsql-*/schema.sql zabbix'
+su - postgres -s /bin/sh -c 'psql -U zabbix -f /usr/share/doc/zabbix-common-database-pgsql-*/images.sql zabbix'
+su - postgres -s /bin/sh -c 'psql -U zabbix -f /usr/share/doc/zabbix-common-database-pgsql-*/data.sql zabbix'
+apt-get install -y apache2 apache2-mod_php8.2
+systemctl enable --now httpd2
+apt-get install -y php8.2 php8.2-{mbstring,sockets,gd,xmlreader,pgsql,ldap,openssl}
+vim /etc/php/8.2/apache2-mod_php/php.ini
+systemctl restrart httpd2
+vim /etc/zabbix/zabbix_server.conf
+systemctl enable --now zabbix_pgsql
+apt-get install zabbix-phpfrontend-{apache2,php8.2} -y
+ln -s /etc/httpd2/conf/addon.d/A.zabbix.conf /etc/httpd2/conf/extra-enabled/
+chown apache2:apache2 /var/www/webapps/zabbix/ui/conf
+systemctl restrart httpd2
+
+apt-get install zabbix-agent -y
+vim /etc/zabbix/zabbix_agentd.conf
+systemctl enable --now zabbix_agentd.service
+
+nginx:
+apt-get update && apt-get install -y nginx
+vim /etc/nginx/sites-available.d/proxy.conf
+server {
+  listen 80;
+  server_name [domain.name];
+  location / {
+    proxy_pass http://ip;
+  }
+}
+ln -s /etc/nginx/sites-available.d/proxy.conf /etc/nginx/sites-enabled.d/
+systemctl enable --now nginx
